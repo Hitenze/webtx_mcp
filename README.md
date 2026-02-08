@@ -32,13 +32,25 @@ Add to your MCP config (e.g. `~/.claude/claude_desktop_config.json` or Cursor MC
 
 ## Add API Key
 
+### Option 1: Interactive onboard (recommended for first-time setup)
+
+```bash
+uv run python -m webtx_mcp --onboard
+```
+
+Walks you through adding your Google API key with optional monthly limits.
+
+### Option 2: Via MCP tool
+
 Once the server is running, add your Google API key via the MCP tool:
 
 ```
 api_add_key(key="AIza...", name="main")
 ```
 
-Or set `GOOGLE_API_KEY` in a `.env` file in the project root.
+### Option 3: Environment variable
+
+Set `GOOGLE_API_KEY` in a `.env` file in the project root.
 
 ## Tools
 
