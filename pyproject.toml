@@ -1,0 +1,23 @@
+[project]
+name = "webtx-mcp"
+version = "0.1.0"
+description = "Lightweight Gemini MCP server with web search and reasoning"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=0.1.0",
+    "google-genai>=1.0.0",
+    "cryptography>=44.0.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+webtx-mcp = "webtx_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
