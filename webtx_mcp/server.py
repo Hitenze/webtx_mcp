@@ -1,6 +1,6 @@
 """
 FastMCP server for webtx-mcp.
-Provides 4 tools: ask_gemini, api_add_key, api_list_keys, api_remove_key.
+Provides 5 tools: ask_gemini, research_gemini, api_add_key, api_list_keys, api_remove_key.
 """
 
 import logging
@@ -23,7 +23,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from .gemini_client import query_gemini, GEMINI_PRO, GEMINI_FLASH
+from .gemini_client import (
+    GEMINI_FLASH,
+    GEMINI_PRO,
+    query_gemini,
+    query_gemini_deep_research,
+)
 from .key_manager import get_key_manager
 
 # Create the FastMCP server instance
@@ -35,7 +40,26 @@ mcp = FastMCP("webtx-mcp")
 # ============================================================
 
 
-@mcp.tool(description="Send a question to Gemini AI with web search and reasoning")
+def _resolve_output_path(output_path: str) -> Path:
+    """
+    Resolve output path for research files.
+
+    Relative paths are resolved under project root.
+    """
+    path = Path(output_path).expanduser()
+    if not path.is_absolute():
+        path = (project_root / path).resolve()
+    else:
+        path = path.resolve()
+    return path
+
+
+@mcp.tool(
+    description=(
+        "Blocking Gemini call with web search and reasoning. "
+        "May time out for long-running prompts under host MCP tool timeout limits."
+    )
+)
 async def ask_gemini(
     question: str,
     model: str = "flash",
@@ -45,6 +69,10 @@ async def ask_gemini(
 ) -> str:
     """
     Send a question to Gemini AI with configurable parameters.
+
+    Execution mode:
+    - Blocking (single request/response).
+    - May exceed host-side MCP tool timeout for long-running requests.
 
     Args:
         question: The question or prompt to send to Gemini
@@ -95,6 +123,118 @@ async def ask_gemini(
 
     except Exception as e:
         logger.exception(f"[Gemini] Unexpected error: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool(
+    description=(
+        "Run Gemini research and save the full response to a file. "
+        "Supports flash, pro, and deep_research. "
+        "Deep Research uses background interactions with polling."
+    )
+)
+async def research_gemini(
+    question: str,
+    output_path: str,
+    model: str = "deep_research",
+    thinking: str = "medium",
+    temperature: float = 0.7,
+    google_search: bool = True,
+    poll_interval_seconds: int = 10,
+    timeout_seconds: int = 1800,
+    thinking_summaries: str = "auto",
+) -> str:
+    """
+    Run Gemini research and persist result text to a file.
+
+    Execution mode:
+    - For model='deep_research', runs an asynchronous workflow internally
+      (Gemini background interaction + polling).
+    - Returns in a single MCP call; host-side MCP tool timeout still applies.
+
+    Args:
+        question: The question or prompt to research
+        output_path: File path to write the final report
+        model: "deep_research" (default), "pro", or "flash"
+        thinking: Thinking level for flash/pro - "none", "low", "medium", "high"
+        temperature: Sampling temperature for flash/pro (0.0-1.0)
+        google_search: Enable Google Search for flash/pro calls
+        poll_interval_seconds: Deep Research polling interval in seconds
+        timeout_seconds: Deep Research timeout in seconds
+        thinking_summaries: Deep Research summaries - "auto" or "none"
+
+    Returns:
+        Status text including output path and interaction id when available
+    """
+    try:
+        if not question or not question.strip():
+            return "Error: Question cannot be empty"
+
+        if len(question) > 10000:
+            return "Error: Question too long (max 10000 characters)"
+
+        if not output_path or not output_path.strip():
+            return "Error: output_path cannot be empty"
+
+        model_key = (model or "").strip().lower()
+        if model_key not in ("flash", "pro", "deep_research"):
+            return "Error: Invalid model. Use one of: flash, pro, deep_research"
+
+        if poll_interval_seconds <= 0:
+            return "Error: poll_interval_seconds must be > 0"
+        if timeout_seconds <= 0:
+            return "Error: timeout_seconds must be > 0"
+
+        logger.info(f"[Research] Processing question: {question[:100]}...")
+        response_text = ""
+        interaction_id = "n/a"
+
+        if model_key == "deep_research":
+            result = await query_gemini_deep_research(
+                question=question,
+                poll_interval_seconds=poll_interval_seconds,
+                timeout_seconds=timeout_seconds,
+                thinking_summaries=thinking_summaries,
+            )
+            if isinstance(result, str) and result.startswith("Error:"):
+                logger.error(f"[Research] Error: {result}")
+                return result
+
+            interaction_id, response_text = result
+        else:
+            gemini_model = GEMINI_PRO if model_key == "pro" else GEMINI_FLASH
+            thinking_level = thinking.upper()
+            if thinking_level not in ("NONE", "LOW", "MEDIUM", "HIGH"):
+                thinking_level = "MEDIUM"
+
+            response_text = await query_gemini(
+                question=question,
+                model=gemini_model,
+                thinking_level=thinking_level,
+                temperature=temperature,
+                google_search=google_search,
+            )
+            if isinstance(response_text, str) and response_text.startswith("Error:"):
+                logger.error(f"[Research] Error: {response_text}")
+                return response_text
+
+        target_path = _resolve_output_path(output_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(response_text, encoding="utf-8")
+
+        logger.info(
+            "[Research] Saved response (%s chars) to %s",
+            len(response_text),
+            target_path,
+        )
+        return (
+            "Saved Gemini research output to "
+            f"{target_path} (model={model_key}, interaction_id={interaction_id}, "
+            f"chars={len(response_text)})"
+        )
+
+    except Exception as e:
+        logger.exception(f"[Research] Unexpected error: {e}")
         return f"Error: {str(e)}"
 
 
@@ -212,8 +352,8 @@ async def api_remove_key(key_id: int) -> str:
 def main() -> None:
     """Main entry point for the MCP server."""
     logger.info(
-        "Starting webtx-mcp server with 4 tools: "
-        "ask_gemini, api_add_key, api_list_keys, api_remove_key"
+        "Starting webtx-mcp server with 5 tools: "
+        "ask_gemini, research_gemini, api_add_key, api_list_keys, api_remove_key"
     )
 
     transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()
