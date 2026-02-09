@@ -1,8 +1,10 @@
 """
 FastMCP server for webtx-mcp.
-Provides 5 tools: ask_gemini, research_gemini, api_add_key, api_list_keys, api_remove_key.
+Provides 7 tools: ask_gemini, research_gemini_start, research_gemini_status,
+research_gemini_cancel, api_add_key, api_list_keys, api_remove_key.
 """
 
+import json
 import logging
 import os
 import sys
@@ -26,10 +28,22 @@ logger = logging.getLogger(__name__)
 from .gemini_client import (
     GEMINI_FLASH,
     GEMINI_PRO,
+    cancel_gemini_interaction,
+    extract_interaction_text,
+    get_gemini_interaction,
     query_gemini,
-    query_gemini_deep_research,
+    start_gemini_deep_research,
 )
 from .key_manager import get_key_manager
+from .research_jobs import (
+    cleanup_old_jobs,
+    create_job,
+    get_job,
+    mark_saved,
+    set_error,
+    set_error_only,
+    update_status,
+)
 
 # Create the FastMCP server instance
 mcp = FastMCP("webtx-mcp")
@@ -52,6 +66,13 @@ def _resolve_output_path(output_path: str) -> Path:
     else:
         path = path.resolve()
     return path
+
+
+def _json_result(action: str, ok: bool, **kwargs) -> str:
+    """Build a stable JSON string result for MCP tools."""
+    payload = {"ok": ok, "action": action}
+    payload.update(kwargs)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool(
@@ -95,10 +116,14 @@ async def ask_gemini(
         if len(question) > 10000:
             return "Error: Question too long (max 10000 characters)"
 
+        model_key = (model or "").strip().lower()
+        if model_key not in ("flash", "pro"):
+            return "Error: Invalid model. Use one of: flash, pro"
+
         logger.info(f"[Gemini] Processing question: {question[:100]}...")
 
         # Map model string
-        gemini_model = GEMINI_PRO if model.lower() == "pro" else GEMINI_FLASH
+        gemini_model = GEMINI_PRO if model_key == "pro" else GEMINI_FLASH
 
         # Map thinking string
         thinking_level = thinking.upper()
@@ -128,114 +153,322 @@ async def ask_gemini(
 
 @mcp.tool(
     description=(
-        "Run Gemini research and save the full response to a file. "
-        "Supports flash, pro, and deep_research. "
-        "Deep Research uses background interactions with polling."
+        "Start a Gemini Deep Research background interaction and persist task metadata."
     )
 )
-async def research_gemini(
+async def research_gemini_start(
     question: str,
     output_path: str,
-    model: str = "deep_research",
-    thinking: str = "medium",
-    temperature: float = 0.7,
-    google_search: bool = True,
-    poll_interval_seconds: int = 10,
-    timeout_seconds: int = 1800,
     thinking_summaries: str = "auto",
 ) -> str:
     """
-    Run Gemini research and persist result text to a file.
-
-    Execution mode:
-    - For model='deep_research', runs an asynchronous workflow internally
-      (Gemini background interaction + polling).
-    - Returns in a single MCP call; host-side MCP tool timeout still applies.
+    Start a Deep Research interaction and store job metadata in SQLite.
 
     Args:
-        question: The question or prompt to research
-        output_path: File path to write the final report
-        model: "deep_research" (default), "pro", or "flash"
-        thinking: Thinking level for flash/pro - "none", "low", "medium", "high"
-        temperature: Sampling temperature for flash/pro (0.0-1.0)
-        google_search: Enable Google Search for flash/pro calls
-        poll_interval_seconds: Deep Research polling interval in seconds
-        timeout_seconds: Deep Research timeout in seconds
-        thinking_summaries: Deep Research summaries - "auto" or "none"
+        question: Deep research question
+        output_path: File path to write result on completion
+        thinking_summaries: "auto" or "none"
 
     Returns:
-        Status text including output path and interaction id when available
+        JSON string with task metadata and interaction id
     """
     try:
+        cleanup_old_jobs(days=30)
+
         if not question or not question.strip():
-            return "Error: Question cannot be empty"
+            return _json_result(
+                "start",
+                False,
+                error="Question cannot be empty",
+            )
 
         if len(question) > 10000:
-            return "Error: Question too long (max 10000 characters)"
+            return _json_result(
+                "start",
+                False,
+                error="Question too long (max 10000 characters)",
+            )
 
         if not output_path or not output_path.strip():
-            return "Error: output_path cannot be empty"
-
-        model_key = (model or "").strip().lower()
-        if model_key not in ("flash", "pro", "deep_research"):
-            return "Error: Invalid model. Use one of: flash, pro, deep_research"
-
-        if poll_interval_seconds <= 0:
-            return "Error: poll_interval_seconds must be > 0"
-        if timeout_seconds <= 0:
-            return "Error: timeout_seconds must be > 0"
-
-        logger.info(f"[Research] Processing question: {question[:100]}...")
-        response_text = ""
-        interaction_id = "n/a"
-
-        if model_key == "deep_research":
-            result = await query_gemini_deep_research(
-                question=question,
-                poll_interval_seconds=poll_interval_seconds,
-                timeout_seconds=timeout_seconds,
-                thinking_summaries=thinking_summaries,
+            return _json_result(
+                "start",
+                False,
+                error="output_path cannot be empty",
             )
-            if isinstance(result, str) and result.startswith("Error:"):
-                logger.error(f"[Research] Error: {result}")
-                return result
 
-            interaction_id, response_text = result
-        else:
-            gemini_model = GEMINI_PRO if model_key == "pro" else GEMINI_FLASH
-            thinking_level = thinking.upper()
-            if thinking_level not in ("NONE", "LOW", "MEDIUM", "HIGH"):
-                thinking_level = "MEDIUM"
+        resolved_output = str(_resolve_output_path(output_path))
+        logger.info(f"[ResearchStart] Processing question: {question[:100]}...")
 
-            response_text = await query_gemini(
-                question=question,
-                model=gemini_model,
-                thinking_level=thinking_level,
-                temperature=temperature,
-                google_search=google_search,
+        result = await start_gemini_deep_research(
+            question=question,
+            thinking_summaries=thinking_summaries,
+        )
+        if isinstance(result, str) and result.startswith("Error:"):
+            logger.error(f"[ResearchStart] Error: {result}")
+            return _json_result(
+                "start",
+                False,
+                error=result,
+                status="failed",
+                output_path=resolved_output,
             )
-            if isinstance(response_text, str) and response_text.startswith("Error:"):
-                logger.error(f"[Research] Error: {response_text}")
-                return response_text
 
-        target_path = _resolve_output_path(output_path)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(response_text, encoding="utf-8")
+        interaction_id, status = result
+        create_job(
+            interaction_id=interaction_id,
+            question=question,
+            output_path=resolved_output,
+            model="deep_research",
+            status=status,
+        )
 
         logger.info(
-            "[Research] Saved response (%s chars) to %s",
-            len(response_text),
-            target_path,
+            "[ResearchStart] Started interaction %s status=%s output_path=%s",
+            interaction_id,
+            status,
+            resolved_output,
         )
-        return (
-            "Saved Gemini research output to "
-            f"{target_path} (model={model_key}, interaction_id={interaction_id}, "
-            f"chars={len(response_text)})"
+        return _json_result(
+            "start",
+            True,
+            interaction_id=interaction_id,
+            status=status,
+            model="deep_research",
+            output_path=resolved_output,
         )
 
     except Exception as e:
-        logger.exception(f"[Research] Unexpected error: {e}")
-        return f"Error: {str(e)}"
+        logger.exception(f"[ResearchStart] Unexpected error: {e}")
+        return _json_result(
+            "start",
+            False,
+            error=str(e),
+            status="failed",
+        )
+
+
+@mcp.tool(
+    description=(
+        "Check status of a Gemini Deep Research interaction once. "
+        "When completed, writes output to the stored output_path."
+    )
+)
+async def research_gemini_status(interaction_id: str) -> str:
+    """
+    Check Deep Research interaction status and write output when completed.
+
+    Args:
+        interaction_id: Interaction id from research_gemini_start
+
+    Returns:
+        JSON string with current status and file save state
+    """
+    try:
+        cleanup_old_jobs(days=30)
+
+        if not interaction_id or not interaction_id.strip():
+            return _json_result(
+                "status",
+                False,
+                error="interaction_id cannot be empty",
+                status="invalid",
+            )
+
+        interaction_id = interaction_id.strip()
+        job = get_job(interaction_id)
+        if not job:
+            return _json_result(
+                "status",
+                False,
+                interaction_id=interaction_id,
+                status="not_found",
+                error="Job not found for interaction_id",
+            )
+
+        output_path = job["output_path"]
+        output_chars = int(job.get("output_chars") or 0)
+        saved = bool(job.get("saved_at"))
+
+        result = await get_gemini_interaction(interaction_id)
+        if isinstance(result, str) and result.startswith("Error:"):
+            set_error(interaction_id, result, status="failed")
+            return _json_result(
+                "status",
+                False,
+                interaction_id=interaction_id,
+                status="failed",
+                output_path=output_path,
+                saved=saved,
+                output_chars=output_chars,
+                error=result,
+            )
+
+        interaction = result
+        status = getattr(interaction, "status", "unknown")
+        update_status(interaction_id, status)
+
+        if status == "completed" and not saved:
+            try:
+                output = extract_interaction_text(interaction)
+                if not output:
+                    raise ValueError(
+                        "Deep Research completed but returned empty output."
+                    )
+                path = Path(output_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(output, encoding="utf-8")
+                output_chars = len(output)
+                saved = True
+                mark_saved(interaction_id, output_chars, status="completed")
+            except Exception as e:
+                error = str(e)
+                set_error(interaction_id, error, status="failed")
+                return _json_result(
+                    "status",
+                    False,
+                    interaction_id=interaction_id,
+                    status="failed",
+                    output_path=output_path,
+                    saved=False,
+                    output_chars=output_chars,
+                    error=error,
+                )
+
+        if status == "failed":
+            details = "Gemini interaction failed."
+            if hasattr(interaction, "model_dump"):
+                payload = interaction.model_dump(exclude_none=True)
+                if isinstance(payload, dict) and payload.get("error"):
+                    details = f"Gemini interaction failed: {payload['error']}"
+            set_error(interaction_id, details, status="failed")
+            return _json_result(
+                "status",
+                False,
+                interaction_id=interaction_id,
+                status="failed",
+                output_path=output_path,
+                saved=saved,
+                output_chars=output_chars,
+                error=details,
+            )
+
+        # Refresh metadata for a stable response payload.
+        latest = get_job(interaction_id) or {}
+        return _json_result(
+            "status",
+            True,
+            interaction_id=interaction_id,
+            status=latest.get("status", status),
+            output_path=latest.get("output_path", output_path),
+            saved=bool(latest.get("saved_at")),
+            output_chars=int(latest.get("output_chars") or output_chars),
+        )
+
+    except Exception as e:
+        logger.exception(f"[ResearchStatus] Unexpected error: {e}")
+        return _json_result(
+            "status",
+            False,
+            interaction_id=interaction_id,
+            status="failed",
+            error=str(e),
+        )
+
+
+@mcp.tool(
+    description="Cancel a Gemini Deep Research interaction and update local task state."
+)
+async def research_gemini_cancel(interaction_id: str) -> str:
+    """
+    Cancel Deep Research interaction.
+
+    Args:
+        interaction_id: Interaction id from research_gemini_start
+
+    Returns:
+        JSON string with cancellation result
+    """
+    try:
+        if not interaction_id or not interaction_id.strip():
+            return _json_result(
+                "cancel",
+                False,
+                error="interaction_id cannot be empty",
+                status="invalid",
+            )
+
+        interaction_id = interaction_id.strip()
+        job = get_job(interaction_id)
+        if not job:
+            return _json_result(
+                "cancel",
+                False,
+                interaction_id=interaction_id,
+                status="not_found",
+                error="Job not found for interaction_id",
+            )
+
+        result = await cancel_gemini_interaction(interaction_id)
+        if isinstance(result, str) and result.startswith("Error:"):
+            # If cancel fails, verify current remote state before mutating local status.
+            remote = await get_gemini_interaction(interaction_id)
+            if not (isinstance(remote, str) and remote.startswith("Error:")):
+                remote_status = getattr(remote, "status", "unknown")
+                if remote_status in ("completed", "cancelled"):
+                    update_status(interaction_id, remote_status)
+                    latest = get_job(interaction_id) or job
+                    return _json_result(
+                        "cancel",
+                        True,
+                        interaction_id=interaction_id,
+                        status=latest.get("status", remote_status),
+                        output_path=latest.get("output_path"),
+                        saved=bool(latest.get("saved_at")),
+                        output_chars=int(latest.get("output_chars") or 0),
+                        warning=(
+                            "Interaction already in terminal state; "
+                            "cancel had no effect."
+                        ),
+                    )
+
+            # Keep status unchanged when cancellation cannot be confirmed.
+            set_error_only(interaction_id, result)
+            latest = get_job(interaction_id) or job
+            return _json_result(
+                "cancel",
+                False,
+                interaction_id=interaction_id,
+                status=latest.get("status", job.get("status", "unknown")),
+                output_path=latest.get("output_path", job.get("output_path")),
+                saved=bool(latest.get("saved_at")),
+                output_chars=int(latest.get("output_chars") or 0),
+                error=result,
+            )
+
+        status, _ = result
+        final_status = status or "cancelled"
+        update_status(interaction_id, final_status)
+
+        latest = get_job(interaction_id) or job
+        return _json_result(
+            "cancel",
+            True,
+            interaction_id=interaction_id,
+            status=latest.get("status", final_status),
+            output_path=latest.get("output_path"),
+            saved=bool(latest.get("saved_at")),
+            output_chars=int(latest.get("output_chars") or 0),
+        )
+
+    except Exception as e:
+        logger.exception(f"[ResearchCancel] Unexpected error: {e}")
+        return _json_result(
+            "cancel",
+            False,
+            interaction_id=interaction_id,
+            status="failed",
+            error=str(e),
+        )
 
 
 @mcp.tool(description="Add a Google API key for Gemini access")
@@ -352,8 +585,9 @@ async def api_remove_key(key_id: int) -> str:
 def main() -> None:
     """Main entry point for the MCP server."""
     logger.info(
-        "Starting webtx-mcp server with 5 tools: "
-        "ask_gemini, research_gemini, api_add_key, api_list_keys, api_remove_key"
+        "Starting webtx-mcp server with 7 tools: ask_gemini, "
+        "research_gemini_start, research_gemini_status, research_gemini_cancel, "
+        "api_add_key, api_list_keys, api_remove_key"
     )
 
     transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()

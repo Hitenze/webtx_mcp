@@ -43,6 +43,19 @@ CREATE TABLE IF NOT EXISTS api_usage_log (
     error_type TEXT,
     FOREIGN KEY(key_id) REFERENCES api_keys(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS research_jobs (
+    interaction_id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    output_path TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT 'deep_research',
+    status TEXT NOT NULL,
+    last_error TEXT,
+    output_chars INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    saved_at DATETIME
+);
 """
 
 

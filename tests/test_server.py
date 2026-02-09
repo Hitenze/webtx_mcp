@@ -6,7 +6,7 @@ import pytest
 
 
 def test_tool_registration():
-    """Test that all 5 tools are registered on the FastMCP instance."""
+    """Test that all 7 tools are registered on the FastMCP instance."""
     from webtx_mcp.server import mcp
 
     # Get all registered tool names
@@ -16,7 +16,9 @@ def test_tool_registration():
 
     expected = {
         "ask_gemini",
-        "research_gemini",
+        "research_gemini_start",
+        "research_gemini_status",
+        "research_gemini_cancel",
         "api_add_key",
         "api_list_keys",
         "api_remove_key",
@@ -25,8 +27,8 @@ def test_tool_registration():
 
 
 def test_tool_count():
-    """Test exactly 5 tools are registered."""
+    """Test exactly 7 tools are registered."""
     from webtx_mcp.server import mcp
 
     tool_count = len(mcp._tool_manager._tools)
-    assert tool_count == 5, f"Expected 5 tools, got {tool_count}"
+    assert tool_count == 7, f"Expected 7 tools, got {tool_count}"

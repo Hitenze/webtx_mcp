@@ -1,6 +1,6 @@
 # webtx-mcp
 
-Lightweight MCP server that gives any Claude/Cursor agent access to Gemini with web search and reasoning. 5 tools, 4 dependencies, zero setup beyond an API key.
+Lightweight MCP server that gives any Claude/Cursor agent access to Gemini with web search and reasoning. 7 tools, 4 dependencies, zero setup beyond an API key.
 
 ## Quick Start
 
@@ -70,29 +70,86 @@ Execution mode:
 | `temperature` | float | `0.7` | Sampling temperature 0.0-1.0 |
 | `google_search` | bool | `True` | Enable web search |
 
-### `research_gemini`
+### Deep Research Workflow
 
-Run Gemini research and save the final response text to a file.
+`research_gemini` was removed to avoid overlap with `ask_gemini`.
+Deep Research now uses 3 dedicated async-style tools:
 
-Supports:
-- `model="deep_research"` (default): uses Gemini Interactions API Deep Research agent
-- `model="pro"` or `model="flash"`: uses standard generate_content flow
+1. `research_gemini_start`
+2. `research_gemini_status`
+3. `research_gemini_cancel`
 
-Execution mode:
-- `deep_research` uses an asynchronous workflow internally (Gemini background interaction + polling).
-- This tool still returns in one MCP call, so host-side MCP tool timeout still applies unless increased.
+This avoids long blocking tool calls and works better with host MCP timeout limits.
+
+Deep Research jobs are persisted in SQLite (`research_jobs`) and old finished jobs are auto-cleaned after 30 days.
+
+### `research_gemini_start`
+
+Create a Gemini Deep Research background interaction and store metadata.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `question` | str | required | Research question |
-| `output_path` | str | required | File path to write result |
-| `model` | str | `"deep_research"` | `"deep_research"`, `"pro"`, or `"flash"` |
-| `thinking` | str | `"medium"` | For `pro/flash`: `"none"`, `"low"`, `"medium"`, `"high"` |
-| `temperature` | float | `0.7` | For `pro/flash`: sampling temperature |
-| `google_search` | bool | `True` | For `pro/flash`: enable Google Search |
-| `poll_interval_seconds` | int | `10` | For `deep_research`: polling interval |
-| `timeout_seconds` | int | `1800` | For `deep_research`: max wait time |
-| `thinking_summaries` | str | `"auto"` | For `deep_research`: `"auto"` or `"none"` |
+| `question` | str | required | Deep research question |
+| `output_path` | str | required | File path for final output |
+| `thinking_summaries` | str | `"auto"` | `"auto"` or `"none"` |
+
+Response (JSON string) example:
+
+```json
+{
+  "ok": true,
+  "action": "start",
+  "interaction_id": "v1_...",
+  "status": "in_progress",
+  "model": "deep_research",
+  "output_path": "/abs/path/report.md"
+}
+```
+
+### `research_gemini_status`
+
+Fetch latest interaction status once.  
+If completed and not saved yet, writes output to stored `output_path` (idempotent on repeated calls).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `interaction_id` | str | required | ID returned by `research_gemini_start` |
+
+Response (JSON string) example:
+
+```json
+{
+  "ok": true,
+  "action": "status",
+  "interaction_id": "v1_...",
+  "status": "completed",
+  "output_path": "/abs/path/report.md",
+  "saved": true,
+  "output_chars": 12034
+}
+```
+
+### `research_gemini_cancel`
+
+Cancel a running Deep Research interaction.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `interaction_id` | str | required | ID returned by `research_gemini_start` |
+
+Response (JSON string) example:
+
+```json
+{
+  "ok": true,
+  "action": "cancel",
+  "interaction_id": "v1_...",
+  "status": "cancelled",
+  "output_path": "/abs/path/report.md",
+  "saved": false,
+  "output_chars": 0
+}
+```
 
 ### `api_add_key`
 

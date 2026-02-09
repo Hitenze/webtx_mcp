@@ -40,7 +40,7 @@ def configure_google(km) -> int:
     print()
     print("=" * 60)
     print("  Google Gemini API Key")
-    print("   Required for ask_gemini tool")
+    print("   Required for Gemini tools (ask + deep research)")
     print("   Get key: https://makersuite.google.com/app/apikey")
     print("=" * 60)
 

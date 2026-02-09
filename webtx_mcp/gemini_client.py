@@ -3,9 +3,7 @@ Gemini API client for webtx-mcp.
 Simplified from CPS-MCP: no caching, no RAG, no FTS5.
 """
 
-import asyncio
 import logging
-import time
 from typing import Any, Tuple
 
 from google import genai
@@ -53,7 +51,7 @@ async def _call_gemini(
     )
 
 
-def _extract_interaction_text(interaction: Any) -> str:
+def extract_interaction_text(interaction: Any) -> str:
     """Extract joined text blocks from an interactions API response."""
     outputs = getattr(interaction, "outputs", None) or []
     chunks: list[str] = []
@@ -188,17 +186,15 @@ async def query_gemini(
     )
 
 
-async def query_gemini_deep_research(
+async def start_gemini_deep_research(
     question: str,
-    poll_interval_seconds: int = 10,
-    timeout_seconds: int = 1800,
     thinking_summaries: str = "auto",
 ) -> tuple[str, str] | str:
     """
-    Run Gemini Deep Research agent asynchronously and poll until completion.
+    Start a Gemini Deep Research interaction in background mode.
 
     Returns:
-        tuple(interaction_id, text) on success, or "Error: ..." string on failure.
+        tuple(interaction_id, status) on success, or "Error: ..." string on failure.
     """
     from .key_manager import get_key_manager
 
@@ -206,8 +202,6 @@ async def query_gemini_deep_research(
     manager = get_key_manager()
 
     try:
-        poll_seconds = max(1, int(poll_interval_seconds))
-        timeout = max(1, int(timeout_seconds))
         summary_mode = (thinking_summaries or "auto").lower()
         if summary_mode not in ("auto", "none"):
             summary_mode = "auto"
@@ -223,68 +217,63 @@ async def query_gemini_deep_research(
         )
 
         interaction_id = getattr(interaction, "id", None)
+        status = getattr(interaction, "status", "in_progress")
         if not interaction_id:
             manager.report_failure(key_id, 500)
             return "Error: Deep Research did not return an interaction id."
 
-        deadline = time.monotonic() + timeout
-        status = getattr(interaction, "status", "in_progress")
-
-        while status in ("in_progress", "requires_action"):
-            if time.monotonic() >= deadline:
-                try:
-                    await client.aio.interactions.cancel(interaction_id)
-                except Exception:
-                    # Cancel is best-effort only.
-                    pass
-                manager.report_failure(key_id, 408)
-                return (
-                    "Error: Gemini Deep Research timed out "
-                    f"after {timeout} seconds (interaction_id={interaction_id})"
-                )
-
-            await asyncio.sleep(poll_seconds)
-            interaction = await client.aio.interactions.get(interaction_id)
-            status = getattr(interaction, "status", "in_progress")
-
-        if status == "completed":
-            output = _extract_interaction_text(interaction)
-            if not output:
-                manager.report_failure(key_id, 500)
-                return (
-                    "Error: Deep Research completed but returned empty output "
-                    f"(interaction_id={interaction_id})"
-                )
-            manager.report_success(key_id)
-            return interaction_id, output
-
-        if status == "cancelled":
-            manager.report_failure(key_id, 499)
-            return (
-                "Error: Gemini Deep Research was cancelled "
-                f"(interaction_id={interaction_id})"
-            )
-
-        if status == "failed":
-            details = ""
-            if hasattr(interaction, "model_dump"):
-                payload = interaction.model_dump(exclude_none=True)
-                if isinstance(payload, dict) and payload.get("error"):
-                    details = f" - {payload['error']}"
-            manager.report_failure(key_id, 500)
-            return (
-                "Error: Gemini Deep Research failed "
-                f"(interaction_id={interaction_id}){details}"
-            )
-
-        manager.report_failure(key_id, 500)
-        return (
-            "Error: Gemini Deep Research ended with unexpected status "
-            f"'{status}' (interaction_id={interaction_id})"
-        )
+        manager.report_success(key_id)
+        return interaction_id, status
 
     except Exception as e:
         error_str = str(e)
         _report_key_failure(manager, key_id, error_str)
         logger.error(f"Gemini Deep Research error: {e}")
         return f"Error: Gemini Deep Research API call failed - {error_str}"
+
+
+async def get_gemini_interaction(interaction_id: str) -> Any | str:
+    """
+    Fetch a Gemini interaction by id.
+
+    Returns:
+        Interaction object on success, or "Error: ..." string on failure.
+    """
+    from .key_manager import get_key_manager
+
+    client, key_id = get_gemini_client()
+    manager = get_key_manager()
+
+    try:
+        interaction = await client.aio.interactions.get(interaction_id)
+        manager.report_success(key_id)
+        return interaction
+    except Exception as e:
+        error_str = str(e)
+        _report_key_failure(manager, key_id, error_str)
+        logger.error(f"Gemini interaction get error: {e}")
+        return f"Error: Gemini interaction get failed - {error_str}"
+
+
+async def cancel_gemini_interaction(interaction_id: str) -> tuple[str, Any] | str:
+    """
+    Cancel a Gemini interaction by id.
+
+    Returns:
+        tuple(status, interaction) on success, or "Error: ..." string on failure.
+    """
+    from .key_manager import get_key_manager
+
+    client, key_id = get_gemini_client()
+    manager = get_key_manager()
+
+    try:
+        interaction = await client.aio.interactions.cancel(interaction_id)
+        status = getattr(interaction, "status", "cancelled")
+        manager.report_success(key_id)
+        return status, interaction
+    except Exception as e:
+        error_str = str(e)
+        _report_key_failure(manager, key_id, error_str)
+        logger.error(f"Gemini interaction cancel error: {e}")
+        return f"Error: Gemini interaction cancel failed - {error_str}"
