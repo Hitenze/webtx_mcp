@@ -97,8 +97,9 @@ async def ask_gemini(
 
     Args:
         question: The question or prompt to send to Gemini
-        model: Model to use - "pro" for gemini-3-pro-preview,
-               "flash" for gemini-3-flash-preview (default: "flash")
+        model: Model to use - "pro" for gemini-3.1-pro-preview
+               (fallback: 3-pro → flash), "flash" for gemini-3-flash-preview
+               (default: "flash")
         thinking: Thinking level - "none", "low", "medium", "high"
                   (default: "medium")
         temperature: Sampling temperature 0.0-1.0 (default: 0.7)

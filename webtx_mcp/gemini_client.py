@@ -12,10 +12,20 @@ from google.genai import types
 logger = logging.getLogger(__name__)
 
 # Available Gemini models
-GEMINI_PRO = "gemini-3-pro-preview"
+GEMINI_PRO = "gemini-3.1-pro-preview"
+GEMINI_3_PRO = "gemini-3-pro-preview"
 GEMINI_FLASH = "gemini-3-flash-preview"
 GEMINI_DEEP_RESEARCH_AGENT = "deep-research-pro-preview-12-2025"
-GEMINI_FALLBACK = GEMINI_FLASH
+
+# Fallback chain: 3.1-pro → 3-pro → flash
+GEMINI_FALLBACK_CHAIN = {
+    GEMINI_PRO: [GEMINI_3_PRO, GEMINI_FLASH],
+    GEMINI_3_PRO: [GEMINI_FLASH],
+    GEMINI_FLASH: [],
+}
+
+# Retryable HTTP errors that trigger fallback
+_RETRYABLE_ERRORS = {"429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"}
 
 
 def get_gemini_client() -> Tuple[genai.Client, int]:
@@ -78,6 +88,8 @@ def _report_key_failure(manager: Any, key_id: int, error_str: str) -> None:
     """Map known Gemini errors to key-manager failure codes."""
     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
         manager.report_failure(key_id, 429)
+    elif "503" in error_str or "UNAVAILABLE" in error_str:
+        manager.report_failure(key_id, 503)
     elif "401" in error_str or "UNAUTHENTICATED" in error_str:
         manager.report_failure(key_id, 401)
     elif "403" in error_str or "PERMISSION_DENIED" in error_str:
@@ -131,10 +143,8 @@ async def query_gemini(
             types.Tool(google_search=types.GoogleSearch()),
         ]
 
-    # Try primary model, fallback on 429
-    models_to_try = [model]
-    if model != GEMINI_FALLBACK:
-        models_to_try.append(GEMINI_FALLBACK)
+    # Build fallback chain: primary → fallbacks
+    models_to_try = [model] + GEMINI_FALLBACK_CHAIN.get(model, [])
 
     last_error = None
     for current_model in models_to_try:
@@ -147,11 +157,12 @@ async def query_gemini(
 
                 if used_fallback:
                     logger.info(
-                        f"Used fallback model {current_model} due to quota exhaustion"
+                        f"Used fallback model {current_model} "
+                        f"(primary {model} unavailable)"
                     )
                     fallback_notice = (
                         f"[Note: Used fallback model {current_model} "
-                        f"due to Pro quota limits]\n\n"
+                        f"because {model} was unavailable]\n\n"
                     )
                     return fallback_notice + response.text
 
@@ -161,10 +172,12 @@ async def query_gemini(
 
         except Exception as e:
             error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                manager.report_failure(key_id, 429)
+            is_retryable = any(tok in error_str for tok in _RETRYABLE_ERRORS)
+            if is_retryable:
+                code = 429 if ("429" in error_str or "RESOURCE_EXHAUSTED" in error_str) else 503
+                manager.report_failure(key_id, code)
                 logger.warning(
-                    f"Quota exhausted for {current_model}, trying fallback..."
+                    f"{current_model} returned {code}, trying next fallback..."
                 )
                 last_error = e
                 continue
@@ -178,10 +191,10 @@ async def query_gemini(
                 logger.error(f"Gemini API error: {e}")
                 return f"Error: Gemini API call failed - {error_str}"
 
-    # All models failed with quota error
-    logger.error(f"All models exhausted quota: {last_error}")
+    # All models in chain failed
+    logger.error(f"All fallback models exhausted: {last_error}")
     return (
-        f"Error: Gemini API call failed - all models quota exhausted. "
+        f"Error: Gemini API call failed - all models unavailable. "
         f"{str(last_error)}"
     )
 
